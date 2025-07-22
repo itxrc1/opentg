@@ -34,6 +34,25 @@ _gemini_model_cache = None
 DEFAULT_HISTORY_HEAD = 50
 DEFAULT_HISTORY_TAIL = 50
 
+GEMINI_REQ_COLLECTION = "custom.gemini_requests"
+
+la_timezone = pytz.timezone("America/Los_Angeles")
+
+def today_str():
+    return datetime.datetime.now(la_timezone).strftime("%Y-%m-%d")
+
+def increment_gemini_key_count(key):
+    date_key = today_str()
+    req_map = db.get(GEMINI_REQ_COLLECTION, date_key) or {}
+    req_map[key] = req_map.get(key, 0) + 1
+    db.set(GEMINI_REQ_COLLECTION, date_key, req_map)
+
+def get_gemini_key_count(key, date_key=None):
+    if not date_key:
+        date_key = today_str()
+    req_map = db.get(GEMINI_REQ_COLLECTION, date_key) or {}
+    return req_map.get(key, 0)
+
 def get_history_limits():
     head = db.get("custom.gsettings", "history_head")
     tail = db.get("custom.gsettings", "history_tail")
@@ -82,7 +101,6 @@ enabled_users = db.get(settings_collection, "enabled_users") or []
 disabled_users = db.get(settings_collection, "disabled_users") or []
 gchat_for_all = db.get(settings_collection, "gchat_for_all") or False
 smileys = ["-.-", "):", ":)", "*.*", ")*"]
-la_timezone = pytz.timezone("America/Los_Angeles")
 ROLES_URL = "https://gist.githubusercontent.com/iTahseen/00890d65192ca3bd9b2a62eb034b96ab/raw/roles.json"
 BOT_PIC_GROUP_ID = -1001234567890
 
@@ -204,6 +222,8 @@ async def generate_gemini_response(input_data, chat_history, user_id):
     while retries > 0:
         try:
             current_key = gemini_keys[current_key_index]
+            # Increment daily request count
+            increment_gemini_key_count(current_key)
             genai.configure(api_key=current_key)
             model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
             model.safety_settings = safety_settings
@@ -324,6 +344,8 @@ async def gchat(client: Client, message: Message):
             while retries > 0:
                 try:
                     current_key = gemini_keys[current_key_index]
+                    # Increment daily request count for current key
+                    increment_gemini_key_count(current_key)
                     genai.configure(api_key=current_key)
                     model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
                     model.safety_settings = safety_settings
@@ -386,6 +408,7 @@ async def handle_files(client: Client, message: Message):
                     prompt_text = "User sent multiple images." + (f" Caption: {caption}" if caption else "")
                     prompt = build_prompt(bot_role, chat_history, prompt_text)
                     input_data = [prompt] + sample_images
+                    # Use the request counter for the Gemini key in generate_gemini_response
                     response = await generate_gemini_response(input_data, chat_history, user_id)
                     if await handle_gpic_message(client, message.chat.id, response):
                         return
@@ -408,6 +431,7 @@ async def handle_files(client: Client, message: Message):
             prompt_text = f"User sent a {file_type}." + (f" Caption: {caption}" if caption else "")
             prompt = build_prompt(bot_role, chat_history, prompt_text)
             input_data = [prompt, uploaded_file]
+            # Use the request counter for the Gemini key in generate_gemini_response
             response = await generate_gemini_response(input_data, chat_history, user_id)
             if await handle_gpic_message(client, message.chat.id, response):
                 return
@@ -509,7 +533,13 @@ async def set_gemini_key(client: Client, message: Message):
                 await send_reply(message.edit_text, [f"History head: {head}, tail: {tail}"], {}, client)
                 return
 
-        keys_list = "\n".join([f"{i + 1}. {key}" for i, key in enumerate(gemini_keys)])
+        # ---- PATCH: Show Gemini key request count for today ----
+        keys_list = "\n".join([
+            f"{i + 1}. {key} ({get_gemini_key_count(key)})"
+            for i, key in enumerate(gemini_keys)
+        ])
+        # ---- END PATCH ----
+
         current_key = gemini_keys[current_key_index] if gemini_keys else "None"
         current_model = get_gemini_model()
         voice_status = "ON" if get_voice_generation_enabled() else "OFF"
